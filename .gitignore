@@ -1,0 +1,26 @@
+# Local environment / secrets
+.env
+.env.*
+*.env
+
+# Project-specific sensitive config/data
+config/*.json
+# Keep default.json tracked if you want the starter config in repo
+# data/default.json
+
+data/spicy.json
+
+# Local/generated folders
+not used/
+__pycache__/
+*.pyc
+*.pyo
+
+# Large model and weights files
+model/*.safetensors
+weights/*.pth
+weights/*.pt
+
+# OS/editor noise
+.DS_Store
+Thumbs.db
