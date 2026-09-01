@@ -1,14 +1,10 @@
-# Local environment / secrets
+# Local environment
 .env
 .env.*
 *.env
 
 # Project-specific sensitive config/data
 config/*.json
-# Keep default.json tracked if you want the starter config in repo
-# data/default.json
-
-data/spicy.json
 
 # Local/generated folders
 not used/
@@ -21,6 +17,11 @@ model/*.safetensors
 weights/*.pth
 weights/*.pt
 
+# External dependencies / embedded repos
+modules/sam2_repo/
+
 # OS/editor noise
 .DS_Store
 Thumbs.db
+
+data/chili.json
