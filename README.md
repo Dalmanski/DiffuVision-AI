@@ -106,17 +106,17 @@ This project is actively under development and does not currently have a standal
 * **Added Face Restoration Toggle:** Added an option to enable or disable face restoration on output images *(Default: Off)*.
 * **Recommended Default Configuration Example:**
   ```json
-{
-    "positive_prompt": "black tuxedo, necktie",
-    "negative_prompt": "wrinkled, low quality, bad anatomy, deformed, extra limbs",
-    "segmentation_positive_prompt": "shirt, pants",
-    "segmentation_negative_prompt": "",
-    "steps": 30,
-    "cfg": 7.3,
-    "strength": 0.81,
-    "seed": -1,
-    "guidance_rescale": 0,
-    "mask_blur": 0.2,
-    "mask_outline_thickness": 1.3
-}
+  {
+      "positive_prompt": "black tuxedo, necktie",
+      "negative_prompt": "wrinkled, low quality, bad anatomy, deformed, extra limbs",
+      "segmentation_positive_prompt": "shirt, pants",
+      "segmentation_negative_prompt": "",
+      "steps": 30,
+      "cfg": 7.3,
+      "strength": 0.81,
+      "seed": -1,
+      "guidance_rescale": 0,
+      "mask_blur": 0.2,
+      "mask_outline_thickness": 1.3
+  }
   ```
