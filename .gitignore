@@ -14,8 +14,8 @@ __pycache__/
 
 # Large model and weights files
 model/*.safetensors
-weights/*.pth
-weights/*.pt
+model/weights/*.pth
+model/weights/*.pt
 
 # External dependencies / embedded repos
 modules/sam2_repo/

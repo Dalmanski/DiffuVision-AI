@@ -1,13 +1,13 @@
 {
-    "positive_prompt": "black professional outfit",
-    "negative_prompt": "wrinkled outfit, low quality, bad anatomy, deformed, extra limbs",
-    "segmentation_positive_prompt": "person",
-    "segmentation_negative_prompt": "face, hair, eyeglass",
+    "positive_prompt": "black tuxedo, necktie",
+    "negative_prompt": "wrinkled, low quality, bad anatomy, deformed, extra limbs",
+    "segmentation_positive_prompt": "shirt, pants",
+    "segmentation_negative_prompt": "",
     "steps": 30,
     "cfg": 7.3,
     "strength": 0.81,
     "seed": -1,
     "guidance_rescale": 0,
-    "mask_blur": 0.5,
-    "mask_outline_thickness": 0.5
+    "mask_blur": 0.2,
+    "mask_outline_thickness": 1.3
 }
