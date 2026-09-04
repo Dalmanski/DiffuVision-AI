@@ -1,0 +1,151 @@
+{
+    "format": "OpenPose-Stickman-Rigid",
+    "version": 29,
+    "source": "openpose_editor.py",
+    "image_width": 1021,
+    "image_height": 1540,
+    "joints": {
+        "Nose": [
+            496.541,
+            592.0324
+        ],
+        "Neck": [
+            490.5586,
+            762.4751
+        ],
+        "RShoulder": [
+            374.9753,
+            724.5089
+        ],
+        "RElbow": [
+            172.5803,
+            635.7195
+        ],
+        "RWrist": [
+            369.3534,
+            572.6842
+        ],
+        "LShoulder": [
+            599.6739,
+            713.2238
+        ],
+        "LElbow": [
+            798.5993,
+            625.7591
+        ],
+        "LWrist": [
+            597.2994,
+            568.9921
+        ],
+        "RHip": [
+            424.752,
+            1115.3918
+        ],
+        "RKnee": [
+            210.4435,
+            865.831
+        ],
+        "RAnkle": [
+            -63.9498,
+            936.3233
+        ],
+        "LHip": [
+            568.3301,
+            1121.4074
+        ],
+        "LKnee": [
+            774.4039,
+            880.0934
+        ],
+        "LAnkle": [
+            1026.6088,
+            1004.4159
+        ],
+        "REye": [
+            466.6289,
+            565.9647
+        ],
+        "LEye": [
+            518.4766,
+            561.9543
+        ],
+        "REar": [
+            426.7461,
+            588.022
+        ],
+        "LEar": [
+            558.3594,
+            586.0168
+        ]
+    },
+    "bones": [
+        {
+            "a": "Nose",
+            "b": "Neck"
+        },
+        {
+            "a": "Neck",
+            "b": "RShoulder"
+        },
+        {
+            "a": "RShoulder",
+            "b": "RElbow"
+        },
+        {
+            "a": "RElbow",
+            "b": "RWrist"
+        },
+        {
+            "a": "Neck",
+            "b": "LShoulder"
+        },
+        {
+            "a": "LShoulder",
+            "b": "LElbow"
+        },
+        {
+            "a": "LElbow",
+            "b": "LWrist"
+        },
+        {
+            "a": "Neck",
+            "b": "RHip"
+        },
+        {
+            "a": "RHip",
+            "b": "RKnee"
+        },
+        {
+            "a": "RKnee",
+            "b": "RAnkle"
+        },
+        {
+            "a": "Neck",
+            "b": "LHip"
+        },
+        {
+            "a": "LHip",
+            "b": "LKnee"
+        },
+        {
+            "a": "LKnee",
+            "b": "LAnkle"
+        },
+        {
+            "a": "RHip",
+            "b": "LHip"
+        },
+        {
+            "a": "REye",
+            "b": "LEye"
+        },
+        {
+            "a": "REye",
+            "b": "REar"
+        },
+        {
+            "a": "LEye",
+            "b": "LEar"
+        }
+    ]
+}

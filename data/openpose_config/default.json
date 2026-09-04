@@ -1,0 +1,17 @@
+{
+    "body_steps": 40,
+    "body_guidance_scale": 5.5,
+    "identity_strength": 0.8,
+    "openpose_strength": 1,
+    "seed": 123456,
+    "positive_prompt": "body pose",
+    "negative_prompt": "deformed face, bad anatomy, bad hands, missing fingers, extra limbs, disfigured,  blurry, low quality, color filter, color grading, sepia, warm tint, cool tint, vignette, oversaturated",
+    "face_refinement_strength": 0.18,
+    "face_refinement_steps": 40,
+    "face_refinement_cfg": 4.5,
+    "face_refinement_ip_scale": 0.95,
+    "face_crop_scale": 2.4,
+    "face_mask_expand_x": 0.1,
+    "face_mask_expand_y": 0.12,
+    "face_mask_feather": 0.04
+}

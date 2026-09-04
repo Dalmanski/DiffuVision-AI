@@ -9,6 +9,7 @@ sys.modules.setdefault('torchvision.transforms.functional_tensor', TF)
 from diffusers import StableDiffusionInpaintPipeline, DPMSolverMultistepScheduler
 import modules.segdinosam2 as segdinosam2
 import modules.imgclass as imgclass
+import modules.json_textbox as json_textbox
 REAL = imgclass.REAL
 ANIME = imgclass.ANIME
 THREE_D = imgclass.THREE_D
@@ -23,14 +24,12 @@ try:
 except Exception:
     pass
 
-ctk.set_appearance_mode('Dark')
-ctk.set_default_color_theme('blue')
 BASE_DIR = Path(__file__).resolve().parent
+ctk.set_appearance_mode('Dark')
+ctk.set_default_color_theme(str(BASE_DIR / 'themes' / 'custom.json'))
 MODEL_DIR = BASE_DIR / 'model'
-DEFAULT_JSON = BASE_DIR / 'data/default.json'
+DEFAULT_JSON = BASE_DIR / 'data/diffusion_config/default.json'
 DEVICE = 'cuda' if torch.cuda.is_available() else 'cpu'
-LAZYMIX_FILENAME = 'lazymixRealAmateur_v40Inpainting.safetensors'
-DREAMSHAPER_FILENAME = 'DreamShaper_8_INPAINTING.inpainting.safetensors'
 
 def read_env_file():
     env_path = BASE_DIR / '.env'
@@ -53,41 +52,40 @@ def read_env_file():
         return {}
     return values
 
-def resolve_model_path(env_key, default_filename=None):
-    value = read_env_file().get(env_key, '').strip()
-    candidates = []
-    if value:
-        candidates.append(value)
-    if default_filename:
-        candidates.append(default_filename)
-        candidates.append(str(MODEL_DIR / default_filename))
+def discover_models():
+    env_value = read_env_file().get('SD_INPAINT_MODEL', '').strip()
+    paths = []
+    if env_value:
+        try:
+            parsed = json.loads(env_value)
+            if isinstance(parsed, list):
+                paths.extend(parsed)
+            elif isinstance(parsed, str):
+                paths.append(parsed)
+        except json.JSONDecodeError:
+            paths.append(env_value)
+    if MODEL_DIR.exists():
+        paths.extend(str(path) for path in sorted(MODEL_DIR.glob('*.safetensors'), key=lambda item: item.name.lower()))
+    models = {}
     seen = set()
-    for raw in candidates:
-        if not raw:
+    for raw_path in paths:
+        if not raw_path:
             continue
-        path = Path(raw)
+        path = Path(str(raw_path).strip())
         if not path.is_absolute():
-            if default_filename and path.name.lower() == default_filename.lower() and (path.parent in (Path('.'), Path(''))):
-                path = MODEL_DIR / path.name
-            else:
-                path = BASE_DIR / path
-        resolved = path.resolve(strict=False)
-        if str(resolved) not in seen:
-            seen.add(str(resolved))
-            if resolved.exists():
-                return resolved
-    if default_filename:
-        fallback = MODEL_DIR / default_filename
-        if fallback.exists():
-            return fallback
-    return None
+            path = BASE_DIR / path
+        path = path.resolve(strict=False)
+        key = str(path).lower()
+        if key in seen or not path.exists() or path.suffix.lower() != '.safetensors':
+            continue
+        seen.add(key)
+        models[path.stem] = str(path)
+    return models
 
-LAZYMIX_MODEL = resolve_model_path('LAZYMIX_MODEL', LAZYMIX_FILENAME)
-DREAMSHAPER_MODEL = resolve_model_path('DREAMSHAPER_MODEL', DREAMSHAPER_FILENAME)
-MODEL_OPTIONS = {'LazyMixRealAmateur v4.0 Inpainting': str(LAZYMIX_MODEL) if LAZYMIX_MODEL else '', 'DreamShaper 8 Inpainting': str(DREAMSHAPER_MODEL) if DREAMSHAPER_MODEL else ''}
-DEFAULT_MODEL = 'DreamShaper 8 Inpainting'
+MODEL_OPTIONS = {}
+DEFAULT_MODEL = ''
 MAX_SIDE = 768
-RESIZE_TARGET = 512
+MIN_RESIZE_SIDE = 512
 OUTPUT_TARGET = 1080
 IMAGE_CLASSES = [REAL, ANIME, THREE_D, CARTOON]
 FACE_RESTORE_POSITIVE_PROMPT = 'face, hair'
@@ -118,8 +116,8 @@ class App(ctk.CTk):
         super().__init__()
         self.title('DiffuVision AI - Inpainting with Stable Diffusion')
         self.iconbitmap('favicon.ico')
-        self.geometry('1600x1050')
-        self.minsize(1100, 760)
+        self.geometry('1600x1150')
+        self.minsize(1100, 900)
         self.pipe = None
         self.current_model_name = None
         self.current_model_id = None
@@ -127,6 +125,7 @@ class App(ctk.CTk):
         self.segmentation = None
         self.original_image = None
         self.input_image = None
+        self.sd_input_image = None
         self.output_image = None
         self.input_path = None
         self.mask_image = None
@@ -141,21 +140,29 @@ class App(ctk.CTk):
         self.save_job = None
         self.input_photo = None
         self.output_photo = None
+        self.crop_box = None
+        self.crop_box_start = None
+        self.input_display_info = None
+        self.cropping = False
+        self.active_crop_handle = None
+        self.cropped_original_image = None
         self.resize_var = ctk.BooleanVar(value=True)
         self.esrgan_input_var = ctk.BooleanVar(value=False)
         self.esrgan_output_var = ctk.BooleanVar(value=False)
         self.face_restore_var = ctk.BooleanVar(value=False)
         self.mask_var = ctk.BooleanVar(value=True)
         self.autosave_var = ctk.BooleanVar(value=True)
-        self.model_var = ctk.StringVar(value=DEFAULT_MODEL)
+        self.model_var = ctk.StringVar(value='')
         self.image_class_var = ctk.StringVar(value=REAL)
         self.gender_var = ctk.StringVar(value='neutral')
         self.config_files = []
-        self.active_config_name = 'data/default.json'
+        self.active_config_name = 'data/diffusion_config/default.json'
         self.active_config_path = DEFAULT_JSON
         self.config = {}
         self.env_path = BASE_DIR / '.env'
+        self.output_showing_original = False
         self.load_env_settings()
+        self.model_var.set(DEFAULT_MODEL)
         self.protocol('WM_DELETE_WINDOW', self.destroy)
         self.ui()
         self.stdout_redirect = ConsoleRedirect(self)
@@ -165,7 +172,8 @@ class App(ctk.CTk):
         self.after(100, self.maximize)
         self.refresh_config_files()
         self.load_startup_config()
-        threading.Thread(target=self.load_models, args=(self.model_var.get(),), daemon=True).start()
+        if self.model_var.get():
+            threading.Thread(target=self.load_models, args=(self.model_var.get(),), daemon=True).start()
 
     def maximize(self):
         try:
@@ -183,76 +191,112 @@ class App(ctk.CTk):
         self.left_frame.grid_columnconfigure(1, weight=1)
         self.input_label = ctk.CTkLabel(self.left_frame, text='INPUT IMAGE')
         self.input_label.grid(row=0, column=0, sticky='w', padx=4, pady=(0, 4))
-        self.mask_btn = ctk.CTkButton(self.left_frame, text='HIDE MASK', command=self.toggle_mask, width=120, height=34)
-        self.mask_btn.grid(row=0, column=1, sticky='e', padx=2, pady=(0, 4))
-        self.input_canvas = ctk.CTkCanvas(self.left_frame, bg='#181818', highlightthickness=0, height=430)
-        self.input_canvas.grid(row=1, column=0, columnspan=2, sticky='ew', padx=2, pady=(0, 8))
+        self.mask_button_row = ctk.CTkFrame(self.left_frame, fg_color='transparent')
+        self.mask_button_row.grid(row=0, column=1, sticky='e', padx=2, pady=(0, 4))
+        self.mask_btn = ctk.CTkButton(self.mask_button_row, text='HIDE MASK', command=self.toggle_mask, width=120, height=34)
+        self.mask_btn.grid(row=0, column=0, sticky='e', padx=(0, 3))
+        self.reload_mask_btn = ctk.CTkButton(self.mask_button_row, text='RELOAD MASK', command=self.reload_mask, width=120, height=34, state='disabled')
+        self.reload_mask_btn.grid(row=0, column=1, sticky='e', padx=(3, 0))
+        self.input_image_container = ctk.CTkFrame(self.left_frame, fg_color='#030303', corner_radius=0, height=600)
+        self.input_image_container.grid(row=1, column=0, columnspan=2, sticky='ew', padx=2, pady=(0, 8))
+        self.input_image_container.grid_propagate(False)
+        self.input_canvas = ctk.CTkCanvas(self.input_image_container, bg='#030303', highlightthickness=0)
+        self.input_canvas.pack(fill='both', expand=True)
+        self.reset_crop_btn = ctk.CTkButton(self.input_image_container, text='🖾', command=self.reset_crop, width=34, height=34, corner_radius=6, fg_color='#21262D', hover_color='#30363D', font=('Segoe UI Symbol', 17))
+        self.reset_crop_btn.place(relx=1.0, x=-8, y=8, anchor='ne')
         self.upload_btn = ctk.CTkButton(self.left_frame, text='UPLOAD IMAGE', command=self.upload, height=40)
-        self.upload_btn.grid(row=2, column=0, columnspan=2, sticky='ew', padx=2, pady=(0, 10))
-        ctk.CTkLabel(self.left_frame, text='MODEL:', anchor='w', width=100).grid(row=3, column=0, sticky='w', padx=(4, 8), pady=(0, 8))
+        self.upload_btn.grid(row=2, column=0, columnspan=2, sticky='ew', padx=2, pady=(0, 6))
+        self.preprocessing_row = ctk.CTkFrame(self.left_frame, fg_color='transparent')
+        self.preprocessing_row.grid(row=3, column=0, columnspan=2, sticky='ew', padx=2, pady=(0, 8))
+        self.preprocessing_row.grid_columnconfigure(0, weight=1)
+        self.preprocessing_row.grid_columnconfigure(1, weight=1)
+        self.resize_cb = ctk.CTkCheckBox(self.preprocessing_row, text='Auto resize original image for recommended SD inpainting', variable=self.resize_var)
+        self.resize_cb.grid(row=0, column=0, sticky='w', padx=2, pady=3)
+        self.esrgan_input_cb = ctk.CTkCheckBox(self.preprocessing_row, text='Enhance original image', variable=self.esrgan_input_var)
+        self.esrgan_input_cb.grid(row=0, column=1, sticky='w', padx=2, pady=3)
+        ctk.CTkLabel(self.left_frame, text='MODEL (SD INPAINTING):', anchor='w', width=100).grid(row=4, column=0, sticky='w', padx=(4, 8), pady=(0, 8))
         self.model_menu = ctk.CTkOptionMenu(self.left_frame, variable=self.model_var, values=list(MODEL_OPTIONS.keys()), command=self.model_changed)
-        self.model_menu.grid(row=3, column=1, sticky='ew', padx=2, pady=(0, 8))
-        ctk.CTkLabel(self.left_frame, text='IMAGE CLASS:', anchor='w', width=100).grid(row=4, column=0, sticky='w', padx=(4, 8), pady=(0, 8))
-        self.image_class_menu = ctk.CTkOptionMenu(self.left_frame, variable=self.image_class_var, values=IMAGE_CLASSES)
-        self.image_class_menu.grid(row=4, column=1, sticky='ew', padx=2, pady=(0, 8))
-        ctk.CTkLabel(self.left_frame, text='GENDER:', anchor='w', width=100).grid(row=5, column=0, sticky='w', padx=(4, 8), pady=(0, 8))
-        self.gender_menu = ctk.CTkOptionMenu(self.left_frame, variable=self.gender_var, values=['male', 'female', 'neutral'])
-        self.gender_menu.grid(row=5, column=1, sticky='ew', padx=2, pady=(0, 8))
+        self.model_menu.grid(row=4, column=1, sticky='ew', padx=2, pady=(0, 8))
+        self.class_gender_row = ctk.CTkFrame(self.left_frame, fg_color='transparent')
+        self.class_gender_row.grid(row=5, column=0, columnspan=2, sticky='ew', padx=2, pady=(0, 8))
+        self.class_gender_row.grid_columnconfigure(0, weight=0)
+        self.class_gender_row.grid_columnconfigure(1, weight=1)
+        self.class_gender_row.grid_columnconfigure(2, weight=0)
+        self.class_gender_row.grid_columnconfigure(3, weight=1)
+        ctk.CTkLabel(self.class_gender_row, text='IMAGE CLASS:', anchor='w', width=100).grid(row=0, column=0, sticky='w', padx=(2, 8))
+        self.image_class_menu = ctk.CTkOptionMenu(self.class_gender_row, variable=self.image_class_var, values=IMAGE_CLASSES)
+        self.image_class_menu.grid(row=0, column=1, sticky='ew', padx=(0, 8))
+        ctk.CTkLabel(self.class_gender_row, text='GENDER:', anchor='w', width=75).grid(row=0, column=2, sticky='w', padx=(2, 8))
+        self.gender_menu = ctk.CTkOptionMenu(self.class_gender_row, variable=self.gender_var, values=['male', 'female', 'neutral'])
+        self.gender_menu.grid(row=0, column=3, sticky='ew', padx=(0, 2))
         ctk.CTkLabel(self.left_frame, text='JSON CONFIG:', anchor='w', width=100).grid(row=6, column=0, sticky='w', padx=(4, 8), pady=(0, 8))
-        self.config_menu = ctk.CTkOptionMenu(self.left_frame, values=[], command=self.config_changed)
-        self.config_menu.grid(row=6, column=1, sticky='ew', padx=2, pady=(0, 8))
-        self.autosave_btn = ctk.CTkButton(self.left_frame, text='AUTOSAVE: ON', command=self.toggle_autosave, height=38, width=150)
-        self.autosave_btn.grid(row=7, column=1, sticky='e', padx=2, pady=(0, 8))
-        self.json_box = ctk.CTkTextbox(self.left_frame, height=210, wrap='none')
-        self.json_box.grid(row=8, column=0, columnspan=2, sticky='ew', padx=2, pady=(0, 8))
-        self.json_box.bind('<KeyRelease>', self.json_changed)
-        self.resize_cb = ctk.CTkCheckBox(self.left_frame, text='Auto resize original image for recommended SD inpainting', variable=self.resize_var)
-        self.resize_cb.grid(row=9, column=0, columnspan=2, sticky='w', padx=4, pady=3)
-        self.esrgan_input_cb = ctk.CTkCheckBox(self.left_frame, text='Enhance original image', variable=self.esrgan_input_var)
-        self.esrgan_input_cb.grid(row=10, column=0, columnspan=2, sticky='w', padx=4, pady=3)
-        self.esrgan_output_cb = ctk.CTkCheckBox(self.left_frame, text='Enhance output image', variable=self.esrgan_output_var)
-        self.esrgan_output_cb.grid(row=11, column=0, columnspan=2, sticky='w', padx=4, pady=3)
-        self.face_restore_cb = ctk.CTkCheckBox(self.left_frame, text='Face restore on output', variable=self.face_restore_var)
-        self.face_restore_cb.grid(row=12, column=0, columnspan=2, sticky='w', padx=4, pady=3)
+        self.config_row = ctk.CTkFrame(self.left_frame, fg_color='transparent')
+        self.config_row.grid(row=6, column=1, sticky='ew', padx=2, pady=(0, 8))
+        self.config_row.grid_columnconfigure(0, weight=1)
+        self.config_row.grid_columnconfigure(1, weight=0)
+        self.config_menu = ctk.CTkOptionMenu(self.config_row, values=[], command=self.config_changed)
+        self.config_menu.grid(row=0, column=0, sticky='ew', padx=(0, 5))
+        self.autosave_btn = ctk.CTkButton(self.config_row, text='AUTOSAVE: ON', command=self.toggle_autosave, height=38, width=105)
+        self.autosave_btn.grid(row=0, column=1, sticky='e', padx=(5, 0))
+        self.json_box = json_textbox.JSONTextBox(self.left_frame, height=220, font_size=12, fg_color='#000000')
+        self.json_box.grid(row=7, column=0, columnspan=2, sticky='ew', padx=2, pady=(0, 8))
+        self.json_box.set_change_callback(self.json_changed)
+        self.output_options_row = ctk.CTkFrame(self.left_frame, fg_color='transparent')
+        self.output_options_row.grid(row=8, column=0, columnspan=2, sticky='ew', padx=2, pady=(0, 0))
+        self.output_options_row.grid_columnconfigure(0, weight=1)
+        self.output_options_row.grid_columnconfigure(1, weight=1)
+        self.esrgan_output_cb = ctk.CTkCheckBox(self.output_options_row, text='Enhance output image', variable=self.esrgan_output_var)
+        self.esrgan_output_cb.grid(row=0, column=0, sticky='w', padx=2, pady=3)
+        self.face_restore_cb = ctk.CTkCheckBox(self.output_options_row, text='Face restore on output', variable=self.face_restore_var)
+        self.face_restore_cb.grid(row=0, column=1, sticky='w', padx=2, pady=3)
         self.generate_btn = ctk.CTkButton(self.left_frame, text='GENERATE', command=self.generate, state='disabled', height=42)
-        self.generate_btn.grid(row=13, column=0, columnspan=2, sticky='ew', padx=2, pady=(12, 8))
+        self.generate_btn.grid(row=9, column=0, columnspan=2, sticky='ew', padx=2, pady=(12, 8))
         self.right_frame = ctk.CTkFrame(self)
         self.right_frame.grid(row=0, column=1, sticky='nsew', padx=(5, 10), pady=10)
         self.right_frame.grid_rowconfigure(0, weight=1)
         self.right_frame.grid_columnconfigure(0, weight=1)
-        self.output_canvas = ctk.CTkCanvas(self.right_frame, bg='#181818', highlightthickness=0)
-        self.output_canvas.grid(row=0, column=0, sticky='nsew', padx=10, pady=(10, 6))
-        self.console = ctk.CTkTextbox(self.right_frame, height=260, wrap='none', font=('Consolas', 12), fg_color='#0d0d0d', text_color='#d0d0d0')
+        self.output_container = ctk.CTkFrame(self.right_frame, fg_color='#000000', corner_radius=6)
+        self.output_container.grid(row=0, column=0, sticky='nsew', padx=10, pady=(10, 6))
+        self.output_container.grid_rowconfigure(0, weight=1)
+        self.output_container.grid_columnconfigure(0, weight=1)
+        self.output_canvas = ctk.CTkCanvas(self.output_container, bg='#000000', highlightthickness=0)
+        self.output_canvas.grid(row=0, column=0, sticky='nsew')
+        self.switch_image_btn = ctk.CTkButton(self.output_container, text='⇄', command=self.switch_output_image, width=34, height=34, corner_radius=6, font=('Segoe UI Symbol', 18), fg_color='#21262D', hover_color='#30363D')
+        self.switch_image_btn.place(relx=1.0, x=-8, y=8, anchor='ne')
+        self.console = ctk.CTkTextbox(self.right_frame, height=260, wrap='none', font=('Consolas', 12), fg_color='#000000', text_color='#D0D0D0')
         self.console.grid(row=1, column=0, sticky='ew', padx=10, pady=6)
         self.console.configure(state='disabled')
-        self.save_btn = ctk.CTkButton(self.right_frame, text='SAVE IMAGE AS', command=self.save, state='disabled', height=40)
-        self.save_btn.grid(row=2, column=0, sticky='ew', padx=10, pady=(6, 10))
+        self.save_clear_row = ctk.CTkFrame(self.right_frame, fg_color='transparent')
+        self.save_clear_row.grid(row=2, column=0, sticky='ew', padx=10, pady=(6, 10))
+        self.save_clear_row.grid_columnconfigure(0, weight=1)
+        self.save_clear_row.grid_columnconfigure(1, weight=0)
+        self.save_btn = ctk.CTkButton(self.save_clear_row, text='SAVE IMAGE AS', command=self.save, state='disabled', height=40)
+        self.save_btn.grid(row=0, column=0, sticky='ew', padx=(0, 5))
+        self.clear_btn = ctk.CTkButton(self.save_clear_row, text='CLEAR', command=self.clear_console, height=40, width=100)
+        self.clear_btn.grid(row=0, column=1, sticky='e', padx=(5, 0))
         self.input_canvas.bind('<Configure>', lambda e: self.show_input())
+        self.input_canvas.bind('<ButtonPress-1>', self.start_crop)
+        self.input_canvas.bind('<B1-Motion>', self.update_crop_selection)
+        self.input_canvas.bind('<ButtonRelease-1>', self.finish_crop)
         self.output_canvas.bind('<Configure>', lambda e: self.show_output())
         self.update_autosave_button()
+        self.show_input()
+        self.show_output()
 
     def toggle_mask(self):
         self.mask_var.set(not self.mask_var.get())
         self.mask_btn.configure(text='HIDE MASK' if self.mask_var.get() else 'SHOW MASK')
         self.show_input()
 
+    def update_generate_state(self):
+        state = 'normal' if self.models_ready and self.original_image is not None and self.mask_image is not None and self.sd_input_image is not None and not self.model_loading and not self.segmentation_loading and not self.classification_loading and not self.processing else 'disabled'
+        self.generate_btn.configure(state=state)
+
     def load_env_settings(self):
-        values = {}
-        if self.env_path.exists():
-            try:
-                for line in self.env_path.read_text(encoding='utf-8').splitlines():
-                    line = line.strip()
-                    if not line or line.startswith('#') or ':' not in line:
-                        continue
-                    key, value = line.split(':', 1)
-                    values[key.strip()] = value.strip().strip('"').strip("'")
-            except Exception:
-                values = {}
-        global LAZYMIX_MODEL, DREAMSHAPER_MODEL, MODEL_OPTIONS
-        env_values = read_env_file()
-        LAZYMIX_MODEL = resolve_model_path('LAZYMIX_MODEL', LAZYMIX_FILENAME)
-        DREAMSHAPER_MODEL = resolve_model_path('DREAMSHAPER_MODEL', DREAMSHAPER_FILENAME)
-        MODEL_OPTIONS = {'LazyMixRealAmateur v4.0 Inpainting': str(LAZYMIX_MODEL) if LAZYMIX_MODEL else '', 'DreamShaper 8 Inpainting': str(DREAMSHAPER_MODEL) if DREAMSHAPER_MODEL else ''}
+        values = read_env_file()
+        global MODEL_OPTIONS, DEFAULT_MODEL
+        MODEL_OPTIONS = discover_models()
+        DEFAULT_MODEL = next(iter(MODEL_OPTIONS), '')
         config_value = values.get('JSON_config', '').replace('\\', '/')
         autosave_value = values.get('JSON_autosave', None)
         if config_value:
@@ -320,11 +364,11 @@ class App(ctk.CTk):
             return str(path).replace('\\', '/')
 
     def refresh_config_files(self):
-        data_dir = BASE_DIR / 'data'
+        data_dir = BASE_DIR / 'data' / 'diffusion_config'
         data_dir.mkdir(parents=True, exist_ok=True)
         self.config_files = sorted([p for p in data_dir.glob('*.json') if p.is_file()], key=lambda p: p.name.lower())
         values = [self.relative_display_path(p) for p in self.config_files]
-        self.config_menu.configure(values=values if values else ['data/default.json'])
+        self.config_menu.configure(values=values if values else ['data/diffusion_config/default.json'])
 
     def load_startup_config(self):
         self.refresh_config_files()
@@ -371,6 +415,14 @@ class App(ctk.CTk):
             self.autosave_btn.configure(text='AUTOSAVE: ON', fg_color='#1f8f3a', hover_color='#176b2c')
         else:
             self.autosave_btn.configure(text='AUTOSAVE: OFF', fg_color='#666666', hover_color='#555555')
+
+    def clear_console(self):
+        try:
+            self.console.configure(state='normal')
+            self.console.delete('1.0', 'end')
+            self.console.configure(state='disabled')
+        except Exception:
+            pass
 
     def console_log(self, text, color=None, live=False):
         if text is None:
@@ -538,14 +590,8 @@ class App(ctk.CTk):
     def load_models(self, model_name):
         try:
             model_id = MODEL_OPTIONS.get(model_name, '')
-            if model_name == 'LazyMixRealAmateur v4.0 Inpainting':
-                if not LAZYMIX_MODEL or not LAZYMIX_MODEL.exists():
-                    raise FileNotFoundError('You didn\'t have LazyMix Model yet. Put it in the .env file or in the model folder as "lazymixRealAmateur_v40Inpainting.safetensors".')
-                model_id = str(LAZYMIX_MODEL)
-            if model_name == 'DreamShaper 8 Inpainting':
-                if not DREAMSHAPER_MODEL or not DREAMSHAPER_MODEL.exists():
-                    raise FileNotFoundError('You didn\'t have DreamShaper Model yet. Put it in the .env file or in the model folder as "DreamShaper_8_INPAINTING.inpainting.safetensors".')
-                model_id = str(DREAMSHAPER_MODEL)
+            if not model_id or not Path(model_id).exists():
+                raise FileNotFoundError(f'Model "{model_name}" was not found. Add a .safetensors file to the model folder or list it in "SD_INPAINT_MODEL" in .env.')
             self.unload_pipe()
             dtype = torch.float16 if DEVICE == 'cuda' else torch.float32
             self.console_log(f'Loading {model_name}...')
@@ -570,7 +616,7 @@ class App(ctk.CTk):
             self.model_loading = False
             self.console_log(f'{model_name} ready • {self.active_config_name} • {DEVICE.upper()}')
             self.after(0, lambda: self.model_menu.configure(state='normal'))
-            self.after(0, lambda: self.generate_btn.configure(state='normal' if self.original_image is not None and not self.classification_loading else 'disabled'))
+            self.after(0, self.update_generate_state)
         except Exception as e:
             self.models_ready = False
             self.model_loading = False
@@ -613,6 +659,18 @@ class App(ctk.CTk):
                 pass
             self.cleanup_gpu()
 
+    def prepare_uploaded_image(self, path):
+        image = ImageOps.exif_transpose(Image.open(path))
+        has_alpha = image.mode in ('RGBA', 'LA') or 'transparency' in image.info
+        if has_alpha:
+            rgba = image.convert('RGBA')
+            background = Image.new('RGBA', rgba.size, (255, 255, 255, 255))
+            image = Image.alpha_composite(background, rgba).convert('RGB')
+            self.console_log(f'Transparent background detected • filled with white • {image.width}x{image.height}')
+        else:
+            image = image.convert('RGB')
+        return image
+
     def classify_after_upload(self, file_path):
         try:
             self.console_log('Classifying input image with imgclass...')
@@ -624,6 +682,8 @@ class App(ctk.CTk):
             self.gender_result = gender_result
             self.after(0, lambda result=gender_result: self.set_gender_from_result(result))
             self.console_log('Image class and gender classification complete')
+            self.console_log('Automatic segdinosam2 disabled after upload')
+            self.console_log('Adjust crop and click RELOAD MASK when ready')
         except Exception as e:
             self.classification_result = None
             self.gender_result = None
@@ -635,7 +695,7 @@ class App(ctk.CTk):
             self.console_log(f'Image classification error: {e}')
         finally:
             self.classification_loading = False
-            self.after(0, lambda: self.generate_btn.configure(state='normal' if self.models_ready and self.original_image is not None and not self.model_loading and not self.segmentation_loading else 'disabled'))
+            self.after(0, self.update_generate_state)
 
     def upload(self):
         if self.processing or self.model_loading or self.segmentation_loading or self.classification_loading:
@@ -644,11 +704,14 @@ class App(ctk.CTk):
         if not path:
             return
         try:
-            image = ImageOps.exif_transpose(Image.open(path)).convert('RGB')
+            image = self.prepare_uploaded_image(path)
             self.input_path = path
             self.original_image = image.copy()
             self.input_image = image.copy()
+            self.sd_input_image = None
+            self.cropped_original_image = self.get_cropped_image(image)
             self.output_image = None
+            self.output_showing_original = False
             self.mask_image = None
             self.classification_result = None
             self.gender_result = None
@@ -659,23 +722,28 @@ class App(ctk.CTk):
             self.gender_menu.configure(state='disabled')
             self.save_btn.configure(state='disabled')
             self.generate_btn.configure(state='disabled')
+            self.reload_mask_btn.configure(state='normal')
+            self.reset_crop_btn.configure(state='normal' if self.crop_box is not None else 'disabled')
             self.show_input()
             self.show_output()
-            self.console_log(f'Image loaded • {image.width}x{image.height} • Classifying...')
+            self.console_log(f'Image loaded • white background applied when needed • {image.width}x{image.height} • Classifying...')
             threading.Thread(target=self.classify_after_upload, args=(path,), daemon=True).start()
         except Exception as e:
             messagebox.showerror('Image Error', str(e))
 
     def resize_image(self, image):
+        image = image.convert('RGB')
         w, h = image.size
-        longest = max(w, h)
-        if longest <= RESIZE_TARGET:
+        short_side = min(w, h)
+        if short_side >= MIN_RESIZE_SIDE:
             return image
-        scale = RESIZE_TARGET / longest
-        nw = max(64, (int(w * scale) // 8) * 8)
-        nh = max(64, (int(h * scale) // 8) * 8)
+        scale = MIN_RESIZE_SIDE / short_side
+        nw = max(MIN_RESIZE_SIDE, int(round(w * scale)))
+        nh = max(MIN_RESIZE_SIDE, int(round(h * scale)))
+        nw = max(MIN_RESIZE_SIDE, (nw // 8) * 8)
+        nh = max(MIN_RESIZE_SIDE, (nh // 8) * 8)
         self.console_log(f'Auto resize • {w}x{h} → {nw}x{nh}')
-        return image.resize((nw, nh), Image.LANCZOS)
+        return image.resize((nw, nh), Image.Resampling.LANCZOS)
 
     def resize_output(self, image):
         w, h = image.size
@@ -685,7 +753,7 @@ class App(ctk.CTk):
         scale = OUTPUT_TARGET / longest
         nw = max(8, int(round(w * scale)))
         nh = max(8, int(round(h * scale)))
-        return image.resize((nw, nh), Image.LANCZOS)
+        return image.resize((nw, nh), Image.Resampling.LANCZOS)
 
     def apply_mask_adjustments(self, mask, thickness):
         array = np.asarray(mask, dtype=np.uint8)
@@ -707,14 +775,10 @@ class App(ctk.CTk):
 
     def load_segmentation(self):
         self.ensure_segmentation()
-        self.segmentation_loading = True
-        try:
-            self.console_log('Loading segdinosam2 models...')
-            self.segmentation.load_dino()
-            self.segmentation.load_sam2()
-            self.console_log('segdinosam2 ready')
-        finally:
-            self.segmentation_loading = False
+        self.console_log('Loading segdinosam2 models...')
+        self.segmentation.load_dino()
+        self.segmentation.load_sam2()
+        self.console_log('segdinosam2 ready')
 
     def unload_segmentation(self):
         if not hasattr(self, 'segmentation') or self.segmentation is None:
@@ -737,6 +801,86 @@ class App(ctk.CTk):
                 torch.cuda.ipc_collect()
             except Exception:
                 pass
+
+    def regenerate_mask(self, image):
+        if image is None or self.processing or self.model_loading or self.classification_loading:
+            return
+        self.segmentation_loading = True
+        self.reload_mask_btn.configure(state='disabled')
+        self.generate_btn.configure(state='disabled')
+        self.after(0, self.show_output)
+        try:
+            self.console_log(f'Generating mask with segdinosam2 from {image.width}x{image.height} input...')
+            mask = self.make_mask(image)
+            self.mask_image = mask
+            self.after(0, self.show_input)
+            self.after(0, self.show_output)
+            self.console_log('Mask ready')
+        except Exception as e:
+            self.mask_image = None
+            self.console_log(f'Mask error: {e}')
+            self.after(0, lambda err=str(e): messagebox.showerror('Mask Error', err))
+        finally:
+            self.segmentation_loading = False
+            self.after(0, lambda: self.reload_mask_btn.configure(state='normal' if self.original_image is not None and not self.processing else 'disabled'))
+            self.after(0, lambda: self.reset_crop_btn.configure(state='normal' if self.original_image is not None and self.crop_box is not None else 'disabled'))
+            self.after(0, self.update_generate_state)
+
+    def reload_mask(self):
+        if self.processing or self.model_loading or self.segmentation_loading or self.classification_loading:
+            return
+        if self.original_image is None:
+            return
+        try:
+            self.sync_config()
+        except Exception as e:
+            messagebox.showerror('Configuration Error', str(e))
+            return
+        self.mask_image = None
+        self.sd_input_image = None
+        self.output_image = None
+        self.output_showing_original = False
+        self.generate_btn.configure(state='disabled')
+        self.reload_mask_btn.configure(state='disabled')
+        self.show_input()
+        self.show_output()
+        self.console_log('RELOAD MASK • current JSON + current crop')
+        self.console_log('Input preprocessing started...')
+        threading.Thread(target=self.reload_mask_worker, daemon=True).start()
+
+    def reload_mask_worker(self):
+        try:
+            processed = self.preprocess_uploaded_image(self.original_image)
+            self.after(0, self.show_input)
+            self.console_log(f'Starting segdinosam2 mask generation from {processed.width}x{processed.height}...')
+            self.regenerate_mask(processed.copy())
+        except Exception as e:
+            self.console_log(f'RELOAD MASK error: {e}')
+            self.after(0, lambda err=str(e): messagebox.showerror('Mask Reload Error', err))
+            self.after(0, lambda: self.reload_mask_btn.configure(state='normal' if self.original_image is not None else 'disabled'))
+
+    def preprocess_uploaded_image(self, image):
+        base = image.convert('RGB').copy()
+        if self.resize_var.get():
+            base = self.resize_image(base)
+        self.input_image = base.copy()
+        self.console_log(f'Pre-crop processing image • {base.width}x{base.height}')
+        cropped = self.get_cropped_image(base)
+        self.cropped_original_image = self.get_cropped_image(image)
+        if self.crop_box is not None:
+            self.console_log(f'Crop applied for preprocessing • {cropped.width}x{cropped.height}')
+        else:
+            self.console_log(f'No crop applied • {cropped.width}x{cropped.height}')
+        processed = cropped.copy()
+        if self.esrgan_input_var.get():
+            self.console_log('Enhance original image started...')
+            processed = upscale_img.enhance(processed, output=False, logger=self.console_log, output_target=OUTPUT_TARGET)
+            self.console_log(f'Enhance original image complete • {processed.width}x{processed.height}')
+        if self.resize_var.get():
+            processed = self.resize_image(processed)
+        self.sd_input_image = processed.copy()
+        self.console_log(f'Preprocessed generation input • {processed.width}x{processed.height}')
+        return processed
 
     def make_mask(self, image):
         segmentation_positive_prompt = str(self.config.get('segmentation_positive_prompt', ''))
@@ -890,21 +1034,30 @@ class App(ctk.CTk):
         if self.original_image is None:
             messagebox.showwarning('No Image', 'Please upload an image first.')
             return
+        if self.mask_image is None:
+            messagebox.showwarning('Mask Not Ready', 'Please click RELOAD MASK first.')
+            return
+        if self.sd_input_image is None:
+            messagebox.showwarning('Input Image Not Ready', 'Please click RELOAD MASK first.')
+            return
         try:
             self.sync_config()
         except Exception as e:
             messagebox.showerror('Configuration Error', str(e))
             return
         self.processing = True
+        self.output_image = None
         self.generate_btn.configure(state='disabled')
         self.upload_btn.configure(state='disabled')
+        self.reload_mask_btn.configure(state='disabled')
         self.save_btn.configure(state='disabled')
         self.model_menu.configure(state='disabled')
         self.image_class_menu.configure(state='disabled')
         self.gender_menu.configure(state='disabled')
         self.start_time = time.time()
-        self.console_log('Starting generation...')
-        threading.Thread(target=self.worker, args=(self.original_image.copy(), self.current_model_name), daemon=True).start()
+        self.show_output()
+        self.console_log('Starting generation from processed input image...')
+        threading.Thread(target=self.worker, args=(self.sd_input_image.copy(), self.current_model_name), daemon=True).start()
 
     def classify_input_image(self, file_path):
         return imgclass.classify_image(file_path)
@@ -918,9 +1071,7 @@ class App(ctk.CTk):
 
     def worker(self, source, model_name):
         try:
-            original_source = source.copy()
-            if not self.input_path:
-                raise RuntimeError('No input image path is available for image classification.')
+            original_source = self.cropped_original_image.copy() if self.cropped_original_image is not None else source.copy()
             selected_class = str(self.image_class_var.get()).strip()
             if not selected_class:
                 selected_class = REAL
@@ -928,7 +1079,6 @@ class App(ctk.CTk):
             if selected_gender not in ('male', 'female', 'neutral'):
                 selected_gender = 'neutral'
             classification = self.classification_result or {}
-            sorted_results = classification.get('sorted_results', [])
             best_probability = float(classification.get('best_probability', 0.0))
             detected_class = str(classification.get('best_class', 'unknown'))
             gender_result = self.gender_result or ('neutral', 0.0)
@@ -949,19 +1099,16 @@ class App(ctk.CTk):
             self.console_log(f'Actual positive prompt: {positive_prompt}')
             self.console_log(f'Actual negative prompt: {negative_prompt}')
             self.console_log(f'Generating with selected class {selected_class.upper()} and gender {selected_gender.upper()}')
-            image = source
-            if self.esrgan_input_var.get():
-                image = upscale_img.enhance(image, output=False, logger=self.console_log, output_target=OUTPUT_TARGET)
-            if self.resize_var.get():
-                image = self.resize_image(image)
-            self.input_image = image
-            self.mask_image = None
-            self.after(0, self.show_input)
-            mask = self.make_mask(image)
-            self.mask_image = mask
-            self.after(0, self.show_input)
-            if np.asarray(mask).max() < 10:
+            image = source.copy()
+            mask = self.mask_image.copy() if self.mask_image is not None else None
+            self.console_log(f'Using processed input image for Stable Diffusion • {image.width}x{image.height}')
+            if mask is None:
+                raise RuntimeError('No segmentation mask is available. Please click RELOAD MASK first.')
+            if mask.size != image.size:
+                raise RuntimeError(f'Processed input and cached mask size do not match: input={image.size}, mask={mask.size}. Please click RELOAD MASK.')
+            if np.asarray(mask, dtype=np.uint8).max() < 10:
                 raise RuntimeError('No selected segmentation area was detected by segdinosam2.')
+            self.console_log(f'Using cached segdinosam2 mask • {mask.width}x{mask.height} • no segmentation rerun')
             w, h = self.generation_size(*image.size)
             init = image.resize((w, h), Image.LANCZOS)
             mask = mask.resize((w, h), Image.Resampling.NEAREST)
@@ -970,6 +1117,9 @@ class App(ctk.CTk):
             generator = torch.Generator(device=DEVICE).manual_seed(seed)
             if self.pipe is None:
                 raise RuntimeError('Selected diffusion model is not loaded.')
+            self.console_log(f'Generation seed: {seed}')
+            self.console_log(f'Preparing Stable Diffusion inpainting • {w}x{h}')
+            self.restore_diffusion_model()
 
             def progress(pipe, step_index, timestep, callback_kwargs):
                 step = step_index + 1
@@ -994,6 +1144,7 @@ class App(ctk.CTk):
                 image = upscale_img.enhance(image, output=True, logger=self.console_log, output_target=OUTPUT_TARGET)
             image = self.resize_output(image)
             self.output_image = image
+            self.output_showing_original = False
             self.after(0, self.show_output)
             self.after(0, lambda: self.save_btn.configure(state='normal'))
             if self.autosave_var.get():
@@ -1005,12 +1156,15 @@ class App(ctk.CTk):
             self.after(0, lambda err=str(e): messagebox.showerror('Generation Error', err))
         finally:
             self.processing = False
-            self.after(0, lambda: self.generate_btn.configure(state='normal' if self.models_ready and self.original_image is not None and not self.classification_loading else 'disabled'))
+            self.after(0, self.update_generate_state)
+            self.after(0, lambda: self.reload_mask_btn.configure(state='normal' if self.original_image is not None and not self.segmentation_loading else 'disabled'))
+            self.after(0, lambda: self.reset_crop_btn.configure(state='normal' if self.original_image is not None and self.crop_box is not None else 'disabled'))
             self.after(0, lambda: self.upload_btn.configure(state='normal'))
             self.after(0, lambda: self.model_menu.configure(state='normal'))
             self.after(0, lambda: self.image_class_menu.configure(state='normal'))
             self.after(0, lambda: self.gender_menu.configure(state='normal'))
             self.cleanup_gpu()
+            self.offload_diffusion_model()
 
     def generation_size(self, width, height):
         longest = max(width, height)
@@ -1031,40 +1185,231 @@ class App(ctk.CTk):
             return f'{hours:02d}:{minutes:02d}:{seconds:02d}'
         return f'{minutes:02d}:{seconds:02d}'
 
+    def get_effective_crop_box(self):
+        if self.crop_box is None:
+            return 0.0, 0.0, 1.0, 1.0
+        return self.crop_box
+
+    def get_cropped_image(self, image):
+        image = image.convert('RGB')
+        if self.crop_box is None:
+            return image.copy()
+        width, height = image.size
+        left, top, right, bottom = self.crop_box
+        x1 = max(0, min(width - 1, int(round(left * width))))
+        y1 = max(0, min(height - 1, int(round(top * height))))
+        x2 = max(x1 + 1, min(width, int(round(right * width))))
+        y2 = max(y1 + 1, min(height, int(round(bottom * height))))
+        return image.crop((x1, y1, x2, y2))
+
+    def clamp_crop_box(self, box):
+        left, top, right, bottom = [float(value) for value in box]
+        minimum = 0.02
+        left = max(0.0, min(1.0 - minimum, left))
+        top = max(0.0, min(1.0 - minimum, top))
+        right = max(minimum, min(1.0, right))
+        bottom = max(minimum, min(1.0, bottom))
+        if right - left < minimum:
+            if left + minimum <= 1.0:
+                right = left + minimum
+            else:
+                left = max(0.0, right - minimum)
+        if bottom - top < minimum:
+            if top + minimum <= 1.0:
+                bottom = top + minimum
+            else:
+                top = max(0.0, bottom - minimum)
+        return left, top, right, bottom
+
+    def crop_handle_size(self):
+        return 11
+
+    def crop_handle_points(self, display):
+        x, y, width, height = display
+        left, top, right, bottom = self.get_effective_crop_box()
+        x1 = x + left * width
+        y1 = y + top * height
+        x2 = x + right * width
+        y2 = y + bottom * height
+        xm = (x1 + x2) / 2
+        ym = (y1 + y2) / 2
+        return {'nw': (x1, y1), 'n': (xm, y1), 'ne': (x2, y1), 'w': (x1, ym), 'e': (x2, ym), 'sw': (x1, y2), 's': (xm, y2), 'se': (x2, y2)}
+
+    def get_crop_handle(self, event):
+        if self.input_display_info is None:
+            return None
+        size = self.crop_handle_size() + 5
+        for handle, point in self.crop_handle_points(self.input_display_info).items():
+            if abs(event.x - point[0]) <= size and abs(event.y - point[1]) <= size:
+                return handle
+        return None
+
+    def start_crop(self, event):
+        if self.original_image is None or self.processing or self.model_loading or self.segmentation_loading or self.classification_loading:
+            return
+        if self.input_display_info is None:
+            return
+        handle = self.get_crop_handle(event)
+        if handle is None:
+            return
+        self.active_crop_handle = handle
+        self.crop_box_start = self.get_effective_crop_box()
+        self.cropping = True
+
+    def update_crop_selection(self, event):
+        if not self.cropping or self.input_display_info is None or self.crop_box_start is None:
+            return
+        x, y, width, height = self.input_display_info
+        px = max(x, min(x + width, event.x))
+        py = max(y, min(y + height, event.y))
+        nx = (px - x) / width
+        ny = (py - y) / height
+        left, top, right, bottom = self.crop_box_start
+        if self.active_crop_handle in ('nw', 'w', 'sw'):
+            left = nx
+        if self.active_crop_handle in ('ne', 'e', 'se'):
+            right = nx
+        if self.active_crop_handle in ('nw', 'n', 'ne'):
+            top = ny
+        if self.active_crop_handle in ('sw', 's', 'se'):
+            bottom = ny
+        if self.active_crop_handle in ('nw', 'w', 'sw') and left >= right:
+            left = right - 0.02
+        if self.active_crop_handle in ('ne', 'e', 'se') and right <= left:
+            right = left + 0.02
+        if self.active_crop_handle in ('nw', 'n', 'ne') and top >= bottom:
+            top = bottom - 0.02
+        if self.active_crop_handle in ('sw', 's', 'se') and bottom <= top:
+            bottom = top + 0.02
+        self.crop_box = self.clamp_crop_box((left, top, right, bottom))
+        self.draw_crop_overlay()
+
+    def finish_crop(self, event):
+        if not self.cropping:
+            return
+        self.cropping = False
+        self.active_crop_handle = None
+        self.crop_box_start = None
+        box = self.clamp_crop_box(self.crop_box if self.crop_box is not None else (0.0, 0.0, 1.0, 1.0))
+        if box[0] <= 0.005 and box[1] <= 0.005 and box[2] >= 0.995 and box[3] >= 0.995:
+            self.crop_box = None
+        else:
+            self.crop_box = box
+        self.cropped_original_image = self.get_cropped_image(self.original_image)
+        self.mask_image = None
+        self.sd_input_image = None
+        self.output_image = None
+        self.output_showing_original = False
+        self.reload_mask_btn.configure(state='normal')
+        self.reset_crop_btn.configure(state='normal' if self.crop_box is not None else 'disabled')
+        self.generate_btn.configure(state='disabled')
+        self.console_log('Crop changed • automatic segmentation not restarted • click RELOAD MASK to apply the crop')
+        self.show_input()
+        self.show_output()
+
+    def reset_crop(self):
+        if self.processing or self.model_loading or self.segmentation_loading or self.classification_loading:
+            return
+        if self.original_image is None or self.crop_box is None:
+            return
+        self.crop_box = None
+        self.cropped_original_image = self.original_image.copy()
+        self.mask_image = None
+        self.sd_input_image = None
+        self.output_image = None
+        self.output_showing_original = False
+        self.reload_mask_btn.configure(state='normal')
+        self.reset_crop_btn.configure(state='disabled')
+        self.generate_btn.configure(state='disabled')
+        self.console_log('Crop reset • automatic segmentation not restarted • click RELOAD MASK to apply the full image')
+        self.show_input()
+        self.show_output()
+
+    def compose_mask_for_display(self, image, fitted_size):
+        if self.mask_image is None:
+            return None
+        display_mask = Image.new('L', image.size, 0)
+        crop_box = self.get_effective_crop_box()
+        width, height = image.size
+        x1 = max(0, min(width - 1, int(round(crop_box[0] * width))))
+        y1 = max(0, min(height - 1, int(round(crop_box[1] * height))))
+        x2 = max(x1 + 1, min(width, int(round(crop_box[2] * width))))
+        y2 = max(y1 + 1, min(height, int(round(crop_box[3] * height))))
+        crop_size = (x2 - x1, y2 - y1)
+        mask = self.mask_image.resize(crop_size, Image.Resampling.NEAREST)
+        display_mask.paste(mask, (x1, y1))
+        return display_mask.resize(fitted_size, Image.Resampling.NEAREST)
+
+    def draw_crop_overlay(self):
+        if self.input_display_info is None:
+            return
+        self.input_canvas.delete('crop_overlay')
+        x, y, width, height = self.input_display_info
+        left, top, right, bottom = self.get_effective_crop_box()
+        x1 = x + left * width
+        y1 = y + top * height
+        x2 = x + right * width
+        y2 = y + bottom * height
+        self.input_canvas.create_rectangle(x1, y1, x2, y2, outline='#FFFFFF', width=3, dash=(8, 5), tags='crop_overlay')
+        handle_size = self.crop_handle_size()
+        for point in self.crop_handle_points(self.input_display_info).values():
+            hx, hy = point
+            self.input_canvas.create_rectangle(hx - handle_size, hy - handle_size, hx + handle_size, hy + handle_size, outline='#000000', fill='#FFFFFF', width=2, tags='crop_overlay')
+
     def show_input(self):
         if not hasattr(self, 'input_canvas'):
             return
         self.input_canvas.delete('all')
         image = self.input_image if self.input_image is not None else self.original_image
         if image is None:
+            self.input_display_info = None
+            canvas_w = max(1, self.input_canvas.winfo_width())
+            canvas_h = max(1, self.input_canvas.winfo_height())
+            self.input_canvas.create_text(canvas_w // 2, canvas_h // 2, text='Upload Image', fill='#888888', font=('Segoe UI', 22))
+            self.reset_crop_btn.configure(state='disabled')
             return
         canvas_w = max(1, self.input_canvas.winfo_width())
         canvas_h = max(1, self.input_canvas.winfo_height())
         fitted = ImageOps.contain(image, (canvas_w, canvas_h), method=Image.Resampling.LANCZOS)
-        if self.mask_var.get() and self.mask_image is not None:
-            overlay = Image.new('RGBA', fitted.size, (0, 0, 0, 0))
-            mask = self.mask_image.resize(fitted.size, Image.Resampling.NEAREST)
-            red = Image.new('RGBA', fitted.size, (255, 0, 0, 90))
-            overlay = Image.composite(red, overlay, mask)
-            fitted = Image.alpha_composite(fitted.convert('RGBA'), overlay).convert('RGB')
-        self.input_photo = ImageTk.PhotoImage(fitted)
         x = (canvas_w - fitted.width) // 2
         y = (canvas_h - fitted.height) // 2
+        self.input_display_info = (x, y, fitted.width, fitted.height)
+        if self.mask_var.get() and self.mask_image is not None:
+            display_mask = self.compose_mask_for_display(image, fitted.size)
+            overlay = Image.new('RGBA', fitted.size, (0, 0, 0, 0))
+            red = Image.new('RGBA', fitted.size, (255, 0, 0, 90))
+            overlay = Image.composite(red, overlay, display_mask)
+            fitted = Image.alpha_composite(fitted.convert('RGBA'), overlay).convert('RGB')
+        self.input_photo = ImageTk.PhotoImage(fitted)
         self.input_canvas.create_image(x, y, anchor='nw', image=self.input_photo)
+        self.draw_crop_overlay()
+        self.reset_crop_btn.configure(state='normal' if self.original_image is not None and self.crop_box is not None and not self.processing and not self.segmentation_loading and not self.classification_loading else 'disabled')
 
     def show_output(self):
         if not hasattr(self, 'output_canvas'):
             return
         self.output_canvas.delete('all')
-        if self.output_image is None:
+        image = self.sd_input_image if self.output_showing_original else self.output_image
+        if image is None:
+            canvas_w = max(1, self.output_canvas.winfo_width())
+            canvas_h = max(1, self.output_canvas.winfo_height())
+            loading = self.processing or self.model_loading or self.segmentation_loading or self.classification_loading
+            label = 'Loading. Please wait... See on console' if loading else 'Output Image'
+            self.output_canvas.create_text(canvas_w // 2, canvas_h // 2, text=label, fill='#888888', font=('Segoe UI', 18))
             return
         canvas_w = max(1, self.output_canvas.winfo_width())
         canvas_h = max(1, self.output_canvas.winfo_height())
-        fitted = ImageOps.contain(self.output_image, (canvas_w, canvas_h), method=Image.Resampling.LANCZOS)
+        fitted = ImageOps.contain(image, (canvas_w, canvas_h), method=Image.Resampling.LANCZOS)
         self.output_photo = ImageTk.PhotoImage(fitted)
         x = (canvas_w - fitted.width) // 2
         y = (canvas_h - fitted.height) // 2
         self.output_canvas.create_image(x, y, anchor='nw', image=self.output_photo)
+
+    def switch_output_image(self):
+        if self.output_image is None and self.sd_input_image is None:
+            return
+        self.output_showing_original = not self.output_showing_original
+        self.show_output()
 
     def save(self):
         if self.output_image is None:
